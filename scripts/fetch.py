@@ -49,6 +49,52 @@ def api_get(url, retries=3):
     return None
 
 
+def fetch_arxiv_abstract_and_fulltext(arxiv_id: str) -> str:
+    """Try to get extended content from ArXiv HTML."""
+    if not arxiv_id:
+        return ""
+    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    try:
+        req = Request(url, headers={"Accept": "application/xml"})
+        with urlopen(req, timeout=15) as resp:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.read())
+            ns = {"atom": "http://www.w3.org/2005/Atom"}
+            entry = root.find("atom:entry", ns)
+            if entry is not None:
+                summary = entry.find("atom:summary", ns)
+                if summary is not None and summary.text:
+                    return summary.text.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def download_oa_pdf_text(pdf_url: str) -> str:
+    """Download Open Access PDF and extract text. Returns empty if unavailable."""
+    if not pdf_url:
+        return ""
+    try:
+        req = Request(pdf_url, headers={"User-Agent": "ScholarPipeline/1.0"})
+        with urlopen(req, timeout=30) as resp:
+            pdf_bytes = resp.read()
+            if len(pdf_bytes) > 10_000_000:  # skip >10MB PDFs
+                return ""
+        # Try pdfminer if available
+        try:
+            from io import BytesIO
+            from pdfminer.high_level import extract_text
+            text = extract_text(BytesIO(pdf_bytes))
+            if text and len(text) > 200:
+                # Truncate to ~50K chars for reasonable file size
+                return text[:50000]
+        except ImportError:
+            pass
+    except Exception:
+        pass
+    return ""
+
+
 def slug(title):
     """Title -> filename-safe slug."""
     s = re.sub(r'[^\w\s-]', '', title.lower().strip())
@@ -101,9 +147,23 @@ def fetch_keyword(keyword, state):
         # Build tags from keyword
         tag = keyword.lower().replace(" ", "-")
 
+        # Try to get full text
+        fulltext = ""
+        has_fulltext = False
+        if oa_pdf:
+            print(f"    📄 Trying PDF full text...")
+            fulltext = download_oa_pdf_text(oa_pdf)
+            if fulltext:
+                has_fulltext = True
+                print(f"    ✅ PDF text: {len(fulltext)} chars")
+
         # Write markdown
         filename = f"{year}-{slug(title)}.md"
         filepath = PAPERS_DIR / filename
+
+        fulltext_section = ""
+        if has_fulltext:
+            fulltext_section = f"\n## Full Text (extracted from PDF)\n\n{fulltext}\n"
 
         content = f"""---
 title: "{title}"
@@ -115,6 +175,8 @@ doi: "{doi}"
 arxiv: "{arxiv}"
 citations: {citations}
 is_open_access: {str(is_oa).lower()}
+pdf_url: "{oa_pdf}"
+has_fulltext: {str(has_fulltext).lower()}
 tags: [{tag}]
 content_layer: L1
 fetched: "{datetime.now().strftime('%Y-%m-%d')}"
@@ -123,7 +185,7 @@ fetched: "{datetime.now().strftime('%Y-%m-%d')}"
 ## Abstract
 
 {abstract if abstract else '_No abstract available._'}
-
+{fulltext_section}
 ## Metadata
 
 - **DOI**: {f'https://doi.org/{doi}' if doi else 'N/A'}
@@ -132,6 +194,7 @@ fetched: "{datetime.now().strftime('%Y-%m-%d')}"
 - **Open Access PDF**: {oa_pdf if oa_pdf else 'N/A'}
 - **Citations**: {citations}
 - **Authors**: {', '.join(authors)}
+- **Full Text**: {'✅ Included' if has_fulltext else '❌ Abstract only (PDF unavailable or not Open Access)'}
 """
         filepath.write_text(content, encoding="utf-8")
         state["fetched_ids"].append(pid)
