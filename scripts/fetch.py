@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Semantic Scholar daily paper fetcher.
+Searches for recent Open Access papers by keyword,
+outputs YAML-frontmatter Markdown files into papers/.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime, timedelta
+from pathlib import Path
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError
+from urllib.parse import quote
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PAPERS_DIR = REPO_ROOT / "papers"
+STATE_FILE = REPO_ROOT / ".fetch-state.json"
+
+KEYWORDS = ["AI agent", "ESG", "NILM", "energy management"]
+YEAR_RANGE = "2025-2026"
+PER_KEYWORD = 10
+API_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
+FIELDS = "title,authors,year,abstract,externalIds,citationCount,isOpenAccess,openAccessPdf,url"
+
+# Optional: set SEMANTIC_SCHOLAR_API_KEY env var for higher rate limits
+API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+
+
+def api_get(url, retries=3):
+    """GET with retry on 429."""
+    headers = {"Accept": "application/json"}
+    if API_KEY:
+        headers["x-api-key"] = API_KEY
+    for attempt in range(retries):
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except HTTPError as e:
+            if e.code == 429:
+                wait = 30 * (attempt + 1)
+                print(f"  Rate limited, waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+    return None
+
+
+def slug(title):
+    """Title -> filename-safe slug."""
+    s = re.sub(r'[^\w\s-]', '', title.lower().strip())
+    s = re.sub(r'[\s_]+', '-', s)
+    return s[:80]
+
+
+def load_state():
+    if STATE_FILE.exists():
+        return json.loads(STATE_FILE.read_text())
+    return {"fetched_ids": [], "last_run": None}
+
+
+def save_state(state):
+    state["last_run"] = datetime.now().isoformat()
+    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+
+
+def fetch_keyword(keyword, state):
+    """Fetch papers for one keyword, return list of new papers."""
+    print(f"\n🔍 Searching: {keyword}")
+    url = f"{API_BASE}?query={quote(keyword)}&year={YEAR_RANGE}&limit={PER_KEYWORD}&fields={FIELDS}"
+    data = api_get(url)
+    if not data:
+        print(f"  ❌ Failed to fetch")
+        return []
+
+    total = data.get("total", 0)
+    papers = data.get("data", [])
+    print(f"  Found {total} total, got {len(papers)} results")
+
+    new_papers = []
+    for p in papers:
+        pid = p.get("paperId", "")
+        if pid in state["fetched_ids"]:
+            continue
+
+        title = p.get("title", "Untitled")
+        year = p.get("year", "")
+        abstract = p.get("abstract", "") or ""
+        authors = [a.get("name", "") for a in (p.get("authors") or [])]
+        citations = p.get("citationCount", 0)
+        is_oa = p.get("isOpenAccess", False)
+        oa_pdf = (p.get("openAccessPdf") or {}).get("url", "")
+        ext_ids = p.get("externalIds") or {}
+        doi = ext_ids.get("DOI", "")
+        arxiv = ext_ids.get("ArXiv", "")
+        s2_url = p.get("url", "")
+
+        # Build tags from keyword
+        tag = keyword.lower().replace(" ", "-")
+
+        # Write markdown
+        filename = f"{year}-{slug(title)}.md"
+        filepath = PAPERS_DIR / filename
+
+        content = f"""---
+title: "{title}"
+source: semantic-scholar
+keyword: "{keyword}"
+year: {year}
+authors: [{', '.join(f'"{a}"' for a in authors[:5])}]
+doi: "{doi}"
+arxiv: "{arxiv}"
+citations: {citations}
+is_open_access: {str(is_oa).lower()}
+tags: [{tag}]
+content_layer: L1
+fetched: "{datetime.now().strftime('%Y-%m-%d')}"
+---
+
+## Abstract
+
+{abstract if abstract else '_No abstract available._'}
+
+## Metadata
+
+- **DOI**: {f'https://doi.org/{doi}' if doi else 'N/A'}
+- **ArXiv**: {f'https://arxiv.org/abs/{arxiv}' if arxiv else 'N/A'}
+- **Semantic Scholar**: {s2_url}
+- **Open Access PDF**: {oa_pdf if oa_pdf else 'N/A'}
+- **Citations**: {citations}
+- **Authors**: {', '.join(authors)}
+"""
+        filepath.write_text(content, encoding="utf-8")
+        state["fetched_ids"].append(pid)
+        new_papers.append({"title": title, "keyword": keyword, "file": filename})
+        print(f"  ✅ {title[:60]}...")
+
+    return new_papers
+
+
+def main():
+    PAPERS_DIR.mkdir(exist_ok=True)
+    state = load_state()
+    all_new = []
+
+    for kw in KEYWORDS:
+        new = fetch_keyword(kw, state)
+        all_new.extend(new)
+        time.sleep(5)  # respect rate limit
+
+    save_state(state)
+    print(f"\n📊 Summary: {len(all_new)} new papers fetched")
+    for p in all_new:
+        print(f"  [{p['keyword']}] {p['title'][:60]}")
+
+    return len(all_new)
+
+
+if __name__ == "__main__":
+    n = main()
+    sys.exit(0)
