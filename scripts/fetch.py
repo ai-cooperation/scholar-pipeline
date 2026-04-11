@@ -26,8 +26,9 @@ API_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
 FIELDS = "title,authors,year,abstract,externalIds,citationCount,isOpenAccess,openAccessPdf,url"
 
 # API key: even with key, rate limit is 1 req/sec
+# Key may take hours to propagate after approval; works fine without key if delays are respected
 API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-REQ_INTERVAL = 2  # seconds between API calls (1 req/sec limit + buffer)
+REQ_INTERVAL = 3  # seconds between API calls (1 req/sec limit + safety buffer)
 
 
 def api_get(url, retries=3):
@@ -117,6 +118,7 @@ def save_state(state):
 def fetch_keyword(keyword, state):
     """Fetch papers for one keyword, return list of new papers."""
     print(f"\n🔍 Searching: {keyword}")
+    time.sleep(REQ_INTERVAL)  # pre-request delay to respect rate limit
     url = f"{API_BASE}?query={quote(keyword)}&year={YEAR_RANGE}&limit={PER_KEYWORD}&fields={FIELDS}"
     data = api_get(url)
     if not data:
