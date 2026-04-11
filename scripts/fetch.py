@@ -22,7 +22,12 @@ STATE_FILE = REPO_ROOT / ".fetch-state.json"
 KEYWORDS = ["AI agent", "ESG", "NILM", "energy management"]
 YEAR_RANGE = "2025-2026"
 PER_KEYWORD = 10
-API_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
+# Use Cloudflare Worker proxy to avoid GitHub Actions IP ban
+# Direct: https://api.semanticscholar.org/graph/v1/paper/search
+API_BASE = os.environ.get(
+    "S2_API_BASE",
+    "https://s2-proxy.alan-chen75.workers.dev/graph/v1/paper/search"
+)
 FIELDS = "title,authors,year,abstract,externalIds,citationCount,isOpenAccess,openAccessPdf,url"
 
 # API key: even with key, rate limit is 1 req/sec
