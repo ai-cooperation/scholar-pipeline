@@ -25,8 +25,9 @@ PER_KEYWORD = 10
 API_BASE = "https://api.semanticscholar.org/graph/v1/paper/search"
 FIELDS = "title,authors,year,abstract,externalIds,citationCount,isOpenAccess,openAccessPdf,url"
 
-# Optional: set SEMANTIC_SCHOLAR_API_KEY env var for higher rate limits
+# API key: even with key, rate limit is 1 req/sec
 API_KEY = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
+REQ_INTERVAL = 2  # seconds between API calls (1 req/sec limit + buffer)
 
 
 def api_get(url, retries=3):
@@ -40,9 +41,9 @@ def api_get(url, retries=3):
             with urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())
         except HTTPError as e:
-            if e.code == 429:
-                wait = 30 * (attempt + 1)
-                print(f"  Rate limited, waiting {wait}s...")
+            if e.code in (429, 403):
+                wait = 15 * (attempt + 1)
+                print(f"  Rate limited ({e.code}), waiting {wait}s...")
                 time.sleep(wait)
             else:
                 raise
@@ -200,6 +201,8 @@ fetched: "{datetime.now().strftime('%Y-%m-%d')}"
         state["fetched_ids"].append(pid)
         new_papers.append({"title": title, "keyword": keyword, "file": filename})
         print(f"  ✅ {title[:60]}...")
+        if oa_pdf:
+            time.sleep(REQ_INTERVAL)  # respect rate limit between PDF downloads
 
     return new_papers
 
@@ -212,7 +215,7 @@ def main():
     for kw in KEYWORDS:
         new = fetch_keyword(kw, state)
         all_new.extend(new)
-        time.sleep(5)  # respect rate limit
+        time.sleep(3)  # respect 1 req/sec rate limit
 
     save_state(state)
     print(f"\n📊 Summary: {len(all_new)} new papers fetched")
